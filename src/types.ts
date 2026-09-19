@@ -77,7 +77,6 @@ export interface OrderResult {
 export interface RefundResult {
   refundOrderId: string
   orderId: string
-  balance: number
 }
 
 /** 包含小程序支付接口所需的签名载荷。 */

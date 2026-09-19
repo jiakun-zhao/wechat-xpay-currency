@@ -9,9 +9,9 @@
 
 - 零运行时第三方依赖，使用原生 `fetch` 和 `node:crypto`。
 - 支持生产环境和沙箱环境，`isSandbox` 会同时决定请求中的 `env` 和支付密钥。
-- 统一处理网络错误、JSON 错误、HTTP 错误、微信业务错误和协议错误。
+- 统一处理网络错误、JSON 错误、HTTP 错误、微信业务错误和协议错误，HTTP 状态码判断优先于微信业务错误码。
 - 微信响应缺少 `errcode` 或 `errcode` 为 `0` 时按成功路径处理；非零 `errcode` 优先作为微信错误处理，成功结果仍会校验必需字段。
-- `charge` 和 `present` 直接使用对应接口响应中的剩余 `balance`，每次只请求一次；`refund` 成功后会额外查询余额。
+- `charge` 和 `present` 直接使用对应接口响应中的剩余 `balance`，每次只请求一次；`refund` 只返回订单号，不额外查询余额。
 - 空的 `accessToken` 会自动获取稳定访问令牌，并在同一实例中缓存到令牌即将过期前。
 - 支持显式订单号，便于调用方进行幂等重试。
 
@@ -25,7 +25,7 @@ pnpm add @jiakun-zhao/wechat-xpay-currency
 
 > ⚠️ **必须仅在受信任的服务端运行。** 所有微信密钥、会话密钥和访问令牌都不可下发到浏览器、小程序或其他不受信任的客户端。
 
-本包是 ESM 包，运行环境需要提供全局 `fetch`，并支持 `node:crypto`。它面向服务端运行，不能把微信 `appSecret`、`appKey`、`appSandboxKey`、`sessionKey` 或访问令牌下发到浏览器、小程序或其他不受信任的客户端。
+本包是 ESM 包（`engines` 要求 Node.js >= 18），运行环境需要提供全局 `fetch`，并支持 `node:crypto`。它面向服务端运行，不能把微信 `appSecret`、`appKey`、`appSandboxKey`、`sessionKey` 或访问令牌下发到浏览器、小程序或其他不受信任的客户端。
 
 建议由自己的服务端接收业务请求，在服务端创建 `WeChatXpayCurrency` 并调用本包；客户端只接收经过业务授权和校验后的结果。`recharge` 生成的签名载荷可以按微信支付流程返回给小程序使用，但必须由服务端按业务规则生成，客户端不能自行替换金额、订单号或用户身份。
 
@@ -116,7 +116,7 @@ if (result.success) {
 | `session_expired`      | 微信错误码 `268490009`，会话已过期   |
 | `protocol`             | 响应缺少成功所需字段或格式不符合预期 |
 
-微信接口可能不返回 `errcode` 和 `errmsg`。本包将缺少 `errcode` 与 `errcode === 0` 都视为成功候选；如果存在非零 `errcode`，会先返回微信错误。即使错误码为空或为 `0`，仍会继续校验该接口要求的成功字段，例如访问令牌、会话信息或 `balance`。
+本包先检查 HTTP 状态码：非 2xx 状态（无论响应是否为 JSON）统一归类为 `http` 并保留状态码，再由业务层检查 `errcode`。微信接口可能不返回 `errcode` 和 `errmsg`。对于 2xx 响应，缺少 `errcode` 与 `errcode === 0` 都视为成功候选；如果存在非零 `errcode`，会先返回微信错误。即使错误码为空或为 `0`，仍会继续校验该接口要求的成功字段，例如访问令牌、会话信息或 `balance`。
 
 ## `getAccessToken`
 
@@ -202,6 +202,8 @@ interface Options {
 | `apiOrigin`     | 可选的自定义接口地址，默认使用 `WECHAT_API_ORIGIN`    |
 | `userIp`        | 可选的用户 IP；未提供时使用 `127.0.0.1`               |
 
+构造函数会在运行时校验必填配置：`openid`、`sessionKey`、`appId`、`appSecret`、`offerId`、`appKey`、`appSandboxKey` 必须是非空字符串，`isSandbox` 必须是布尔值，`accessToken` 必须提供字符串（允许空字符串，空串表示自动获取）。校验失败时构造函数抛出 `TypeError`，并在消息中列出缺失或非法的字段。
+
 ### 访问令牌获取与缓存
 
 只有 `accessToken === ''` 时，实例才会自动调用 `getAccessToken`。自动获取的令牌缓存在当前 `WeChatXpayCurrency` 实例中，并在微信返回的有效期提前 30 秒时视为需要重新获取。非空 `accessToken` 会直接使用，不会由实例替换或缓存。
@@ -256,7 +258,7 @@ interface OrderResult {
 
 `amount` 必须是正的安全整数。`orderId` 可省略，省略时由 `createOrderId('CHG')` 自动生成；显式传入时必须是 8–32 位大写字母或数字。
 
-成功判定支持 `errcode` 缺少或为 `0`。接口响应中的数字类型 `balance` 会直接作为结果返回，**不会再次调用余额查询接口，整个操作只发送一次请求**。缺少有效 `balance` 时返回 `protocol` 错误。
+成功判定支持 `errcode` 缺少、为 `0` 或为 `268490004`（重复操作，表示该扣币订单之前已经成功）。接口响应中的数字类型 `balance` 会直接作为结果返回，**不会再次调用余额查询接口，整个操作只发送一次请求**。缺少有效 `balance` 时返回 `protocol` 错误。
 
 ## `present`
 
@@ -288,13 +290,12 @@ interface RefundInput {
 interface RefundResult {
   refundOrderId: string
   orderId: string
-  balance: number
 }
 ```
 
 其中 `orderId` 是原扣币订单号，必须提供；`refundOrderId` 是退款订单号，可省略，省略时由 `createOrderId('RFD')` 自动生成。两个订单号都必须是 8–32 位大写字母或数字。
 
-退款接口的 `errcode` 缺少或为 `0` 时视为成功；`268490004`、`268490005` 和 `268490014` 也按微信协议作为幂等成功处理。退款接口成功后，本包会**额外请求一次** `/xpay/query_user_balance` 获取最新余额，因此一次 `refund` 成功流程包含退款请求和余额查询请求。
+退款接口的 `errcode` 缺少、为 `0` 或为 `268490005`（订单已通过 `cancel_currency_pay` 退款，重试场景视为幂等成功）时按成功处理。`268490014`（退款操作进行中）按微信协议是未完成的中间状态，本包会作为微信错误返回，调用方应稍后使用相同参数重试。退款成功结果只包含订单号，**不会额外请求余额**；需要余额时请自行调用 `queryBalance`。
 
 ## `recharge` / `createRechargeSignature`
 
@@ -382,7 +383,7 @@ const retry = await xpay.charge(10, orderId)
 
 不要在一次未知结果的操作上直接生成新的订单号，否则无法利用微信接口的幂等语义。调用方仍应根据自己的业务记录、网络状态和返回的 `ErrorCategory` 决定是否重试。
 
-赠币会把微信错误码 `268490004` 作为幂等成功；退款会把 `268490004`、`268490005`、`268490014` 作为幂等成功。扣币只把缺少 `errcode` 或 `errcode === 0` 作为成功。
+赠币和扣币会把微信错误码 `268490004`（重复操作，表示之前的操作已经成功）作为幂等成功；退款会把 `268490005`（订单已退款）作为幂等成功。退款错误码 `268490014`（退款操作进行中）不是已完成状态，本包会作为错误返回，调用方稍后应使用相同参数重试。扣币、赠币和退款都接受缺少 `errcode` 或 `errcode === 0` 的成功响应。
 
 ## 包根入口公开的工具函数
 

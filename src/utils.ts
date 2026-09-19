@@ -1,6 +1,6 @@
 /* oxlint-disable eslint/one-var, eslint/max-params, eslint/no-nested-ternary, unicorn/numeric-separators-style */
 
-import { createHash, createHmac, randomBytes } from 'node:crypto'
+import { createHmac, randomBytes } from 'node:crypto'
 import type { ErrorBody, ErrorCategory, FetchJsonResult, Result } from './types'
 
 /** 生成符合微信代币支付规范的订单号。 */
@@ -42,11 +42,6 @@ export function apiUrl(origin: string, path: string, query?: Record<string, stri
   return url.toString()
 }
 
-/** 创建具有统一错误结构的校验失败结果。 */
-export function validationError(message: string): Result<never> {
-  return failure('validation', -3, message)
-}
-
 /** 为一次操作创建带类型的失败结果。 */
 export function failure(category: ErrorCategory, code: number, message: string): Result<never> {
   const error: ErrorBody = { category, code, message }
@@ -58,7 +53,7 @@ export function wechatFailure(code: number, message: string): Result<never> {
   const category: ErrorCategory =
     code === 268_490_006
       ? 'insufficient_balance'
-      : code === 268490009
+      : code === 268_490_009
         ? 'session_expired'
         : 'wechat'
   const error: ErrorBody = {
@@ -99,6 +94,9 @@ export async function fetchJson(url: string, init: RequestInit): Promise<FetchJs
   try {
     data = await response.json()
   } catch (error) {
+    if (response.status >= 400) {
+      return { ok: false, result: failure('http', response.status, `HTTP ${response.status}`) }
+    }
     return { ok: false, result: failure('json', -2, errorMessage(error)) }
   }
   return { ok: true, status: response.status, data }
@@ -119,9 +117,4 @@ export function rechargeSignData(
     offerId,
     outTradeNo: orderId,
   })
-}
-
-/** 根据任意文本创建确定性的短标识符。 */
-export function hashOrderId(prefix: string, value: string): string {
-  return `${prefix}${createHash('sha256').update(value).digest('hex').slice(0, 26).toUpperCase()}`
 }

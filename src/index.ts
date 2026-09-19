@@ -86,11 +86,11 @@ export async function getAccessToken(options: AppCredentials): Promise<Result<Ac
   if (!isRecord(response.data)) {
     return failure('protocol', -2, 'WeChat returned an invalid response')
   }
-  if (typeof response.data.errcode === 'number' && response.data.errcode !== 0) {
-    return wechatFailure(response.data.errcode, stringOrDefault(response.data.errmsg))
-  }
   if (response.status < 200 || response.status >= 300) {
     return failure('http', response.status, `HTTP ${response.status}`)
+  }
+  if (typeof response.data.errcode === 'number' && response.data.errcode !== 0) {
+    return wechatFailure(response.data.errcode, stringOrDefault(response.data.errmsg))
   }
   if (
     typeof response.data.access_token !== 'string' ||
@@ -120,11 +120,11 @@ export async function getSessionKey(options: SessionOptions): Promise<Result<Ses
   if (!isRecord(response.data)) {
     return failure('protocol', -2, 'WeChat returned an invalid response')
   }
-  if (typeof response.data.errcode === 'number' && response.data.errcode !== 0) {
-    return wechatFailure(response.data.errcode, stringOrDefault(response.data.errmsg))
-  }
   if (response.status < 200 || response.status >= 300) {
     return failure('http', response.status, `HTTP ${response.status}`)
+  }
+  if (typeof response.data.errcode === 'number' && response.data.errcode !== 0) {
+    return wechatFailure(response.data.errcode, stringOrDefault(response.data.errmsg))
   }
   if (typeof response.data.openid !== 'string' || typeof response.data.session_key !== 'string') {
     return failure('protocol', -2, 'WeChat returned an invalid session response')
@@ -142,6 +142,32 @@ export class WeChatXpayCurrency {
 
   /** 创建一个微信代币客户端。 */
   constructor(options: Options) {
+    const invalid: string[] = []
+    const requiredStrings: readonly (readonly [string, string])[] = [
+      ['openid', options.openid],
+      ['sessionKey', options.sessionKey],
+      ['appId', options.appId],
+      ['appSecret', options.appSecret],
+      ['offerId', options.offerId],
+      ['appKey', options.appKey],
+      ['appSandboxKey', options.appSandboxKey],
+    ]
+    for (const [key, value] of requiredStrings) {
+      if (typeof value !== 'string' || value.length === 0) {
+        invalid.push(key)
+      }
+    }
+    if (typeof options.accessToken !== 'string') {
+      invalid.push('accessToken')
+    }
+    if (typeof options.isSandbox !== 'boolean') {
+      invalid.push('isSandbox')
+    }
+    if (invalid.length > 0) {
+      throw new TypeError(
+        `wechat-xpay-currency: missing or invalid required options: ${invalid.join(', ')}`,
+      )
+    }
     this.options = options
   }
 
@@ -165,7 +191,7 @@ export class WeChatXpayCurrency {
       return failure('validation', -3, 'A positive integer amount is required')
     }
     const id = input.orderId ?? createOrderId('CHG')
-    return this.mutate(CHARGE_PATH, input.amount, id, [0]).then((result) => {
+    return this.mutate(CHARGE_PATH, input.amount, id, [0, 268_490_004]).then((result) => {
       if (!result.success) {
         return result
       }
@@ -195,21 +221,14 @@ export class WeChatXpayCurrency {
       )
     }
     const id = input.refundOrderId ?? createOrderId('RFD')
-    return this.mutate(
-      REFUND_PATH,
-      input.amount,
-      id,
-      [0, 268_490_004, 268_490_005, 268_490_014],
-      input.orderId,
-    ).then(async (result) => {
-      if (!result.success) {
-        return result
-      }
-      const balance = await this.xpayBalance()
-      return balance.success
-        ? { success: true, refundOrderId: id, orderId: input.orderId, balance: balance.balance }
-        : balance
-    })
+    return this.mutate(REFUND_PATH, input.amount, id, [0, 268_490_005], input.orderId).then(
+      (result) => {
+        if (!result.success) {
+          return result
+        }
+        return { success: true, refundOrderId: id, orderId: input.orderId }
+      },
+    )
   }
 
   /** 赠送微信代币并返回赠送后的余额。 */

@@ -1,6 +1,6 @@
 /* oxlint-disable eslint/one-var, eslint/no-undefined, eslint/curly, unicorn/numeric-separators-style, typescript/array-type, unicorn/prefer-response-static-json, typescript/explicit-function-return-type, typescript/no-base-to-string, vitest/max-expects, vitest/require-top-level-describe, vitest/no-hooks, vitest/prefer-to-be-falsy, vitest/no-conditional-expect, vitest/prefer-to-be-truthy, vitest/prefer-strict-boolean-matchers */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WeChatXpayCurrency,
   getAccessToken,
@@ -96,6 +96,32 @@ describe('独立微信接口', () => {
       },
     })
     expect(requests[0]?.url.searchParams.get('js_code')).toBe('bad')
+  })
+
+  it('非 JSON 的 HTTP 错误归类为 http 并保留状态码', async () => {
+    expect.hasAssertions()
+    globalThis.fetch = async () =>
+      new Response('<html>502 Bad Gateway</html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html' },
+      })
+    const result = await getAccessToken({ appId: 'app', appSecret: 'secret' })
+    expect(result).toMatchObject({ success: false, error: { category: 'http', code: 502 } })
+  })
+
+  it('http 状态码优先于微信错误码判断', async () => {
+    expect.hasAssertions()
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ errcode: 40013, errmsg: 'invalid appid' }), { status: 400 })
+    const result = await getAccessToken({ appId: 'app', appSecret: 'secret' })
+    expect(result).toMatchObject({ success: false, error: { category: 'http', code: 400 } })
+  })
+
+  it('访问令牌响应缺少必需字段时返回协议错误', async () => {
+    expect.hasAssertions()
+    responses.push({ body: { expires_in: 7200 } })
+    const result = await getAccessToken({ appId: 'app', appSecret: 'secret' })
+    expect(result).toMatchObject({ success: false, error: { category: 'protocol', code: -2 } })
   })
 })
 
@@ -209,14 +235,14 @@ describe('带签名的虚拟支付操作', () => {
     })
     expect(result.success).toBe(false)
     expect(requests).toHaveLength(0)
-    responses.push({ body: { errcode: 0 } }, { body: { balance: 6 } })
+    responses.push({ body: { errcode: 0 } })
     const success = await new WeChatXpayCurrency(options()).refund(2, 'CHGORDER1', 'RFDORDER1')
     expect(success).toStrictEqual({
       success: true,
       refundOrderId: 'RFDORDER1',
       orderId: 'CHGORDER1',
-      balance: 6,
     })
+    expect(requests).toHaveLength(1)
     expect(JSON.parse(requests[0]?.body ?? '{}')).toStrictEqual({
       amount: 2,
       env: 0,
@@ -265,35 +291,70 @@ describe('带签名的虚拟支付操作', () => {
     expect(requests).toHaveLength(1)
   })
 
-  it('接受所有退款幂等返回码并刷新余额', async () => {
+  it('订单已退款时按幂等成功处理', async () => {
     expect.hasAssertions()
-    const client = new WeChatXpayCurrency(options())
-    responses.push(
-      { body: { errcode: 268_490_005 } },
-      { body: { balance: 9 } },
-      { body: { errcode: 268_490_004 } },
-      { body: { balance: 8 } },
-      { body: { errcode: 268_490_014 } },
-      { body: { balance: 7 } },
-    )
-    await expect(client.refund(1, 'CHGORDER1', 'RFDORDER1')).resolves.toStrictEqual({
+    responses.push({ body: { errcode: 268_490_005, errmsg: 'already refunded' } })
+    const result = await new WeChatXpayCurrency(options()).refund(1, 'CHGORDER1', 'RFDORDER1')
+    expect(result).toStrictEqual({
       success: true,
       refundOrderId: 'RFDORDER1',
       orderId: 'CHGORDER1',
-      balance: 9,
     })
-    await expect(client.refund(1, 'CHGORDER1', 'RFDORDER2')).resolves.toStrictEqual({
-      success: true,
-      refundOrderId: 'RFDORDER2',
-      orderId: 'CHGORDER1',
-      balance: 8,
+    expect(requests).toHaveLength(1)
+  })
+
+  it('退款处理中不当作成功，保留微信错误', async () => {
+    expect.hasAssertions()
+    responses.push({ body: { errcode: 268_490_014, errmsg: 'refund in progress' } })
+    const result = await new WeChatXpayCurrency(options()).refund(1, 'CHGORDER1', 'RFDORDER1')
+    expect(result).toStrictEqual({
+      success: false,
+      error: {
+        category: 'wechat',
+        code: 268_490_014,
+        message: 'refund in progress',
+        wechatCode: 268_490_014,
+        wechatMessage: 'refund in progress',
+      },
     })
-    await expect(client.refund(1, 'CHGORDER1', 'RFDORDER3')).resolves.toStrictEqual({
-      success: true,
-      refundOrderId: 'RFDORDER3',
-      orderId: 'CHGORDER1',
-      balance: 7,
+    expect(requests).toHaveLength(1)
+  })
+
+  it('退款不把重复操作码当作成功', async () => {
+    expect.hasAssertions()
+    responses.push({ body: { errcode: 268_490_004, errmsg: 'duplicate' } })
+    const result = await new WeChatXpayCurrency(options()).refund(1, 'CHGORDER1', 'RFDORDER1')
+    expect(result).toMatchObject({ success: false, error: { category: 'wechat' } })
+  })
+
+  it('扣币将重复操作作为幂等成功', async () => {
+    expect.hasAssertions()
+    responses.push({ body: { errcode: 268_490_004, balance: 5 } })
+    const result = await new WeChatXpayCurrency(options()).charge(1, 'CHGORDER1')
+    expect(result).toStrictEqual({ success: true, orderId: 'CHGORDER1', balance: 5 })
+    expect(requests).toHaveLength(1)
+  })
+
+  it('非法金额和订单号返回校验错误', async () => {
+    expect.hasAssertions()
+    const client = new WeChatXpayCurrency(options())
+    await expect(client.charge(0)).resolves.toMatchObject({
+      success: false,
+      error: { category: 'validation' },
     })
+    await expect(client.charge(-1)).resolves.toMatchObject({
+      success: false,
+      error: { category: 'validation' },
+    })
+    await expect(client.charge(1.5)).resolves.toMatchObject({
+      success: false,
+      error: { category: 'validation' },
+    })
+    await expect(client.charge({ amount: 1, orderId: 'SHORT' })).resolves.toMatchObject({
+      success: false,
+      error: { category: 'validation' },
+    })
+    expect(requests).toHaveLength(0)
   })
 
   it('保留微信错误码并将余额不足归类为对应错误', async () => {
@@ -338,6 +399,20 @@ describe('充值签名与传输失败', () => {
     expect(requests).toHaveLength(0)
   })
 
+  it('recharge 支持对象形式并校验订单号', async () => {
+    expect.hasAssertions()
+    const result = await new WeChatXpayCurrency(options()).recharge({
+      credits: 50,
+      orderId: 'RCGORDER2',
+    })
+    expect(result.success).toBe(true)
+    expect(result.success ? result.orderId : undefined).toBe('RCGORDER2')
+    await expect(new WeChatXpayCurrency(options()).recharge({ credits: 0 })).resolves.toMatchObject(
+      { success: false, error: { category: 'validation' } },
+    )
+    expect(requests).toHaveLength(0)
+  })
+
   it('将网络错误和 JSON 解析错误分类处理', async () => {
     expect.hasAssertions()
     globalThis.fetch = async () => {
@@ -351,5 +426,64 @@ describe('充值签名与传输失败', () => {
     globalThis.fetch = async () => new Response('not-json')
     const json = await new WeChatXpayCurrency(options()).queryBalance()
     expect(json).toMatchObject({ success: false, error: { category: 'json' } })
+  })
+})
+
+describe('访问令牌自动获取与缓存', () => {
+  it('空 accessToken 时自动获取并复用缓存', async () => {
+    expect.hasAssertions()
+    const client = new WeChatXpayCurrency(options({ accessToken: '' }))
+    responses.push(
+      { body: { access_token: 'token-1', expires_in: 7200 } },
+      { body: { balance: 5 } },
+      { body: { balance: 5 } },
+    )
+    await expect(client.queryBalance()).resolves.toStrictEqual({ success: true, balance: 5 })
+    await expect(client.queryBalance()).resolves.toStrictEqual({ success: true, balance: 5 })
+    expect(requests.map((request) => request.url.pathname)).toStrictEqual([
+      '/cgi-bin/stable_token',
+      '/xpay/query_user_balance',
+      '/xpay/query_user_balance',
+    ])
+  })
+
+  it('令牌即将过期时重新获取', async () => {
+    expect.hasAssertions()
+    vi.useFakeTimers()
+    try {
+      const client = new WeChatXpayCurrency(options({ accessToken: '' }))
+      responses.push(
+        { body: { access_token: 'token-1', expires_in: 60 } },
+        { body: { balance: 5 } },
+        { body: { access_token: 'token-2', expires_in: 60 } },
+        { body: { balance: 5 } },
+        { body: { balance: 6 } },
+      )
+      await expect(client.queryBalance()).resolves.toStrictEqual({ success: true, balance: 5 })
+      vi.advanceTimersByTime(31_000)
+      await expect(client.queryBalance()).resolves.toStrictEqual({ success: true, balance: 5 })
+      await expect(client.queryBalance()).resolves.toStrictEqual({ success: true, balance: 6 })
+      expect(requests.filter((r) => r.url.pathname === '/cgi-bin/stable_token')).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(vi.isFakeTimers()).toBe(false)
+  })
+})
+
+describe('构造函数参数校验', () => {
+  it('缺少必填字段时抛错', () => {
+    expect.hasAssertions()
+    const base = options()
+    expect(() => new WeChatXpayCurrency({ ...base, appKey: '' })).toThrow(/appKey/)
+    expect(() => new WeChatXpayCurrency({ ...base, openid: '' })).toThrow(/openid/)
+    expect(() => new WeChatXpayCurrency({ ...base, isSandbox: 'yes' as never })).toThrow(
+      /isSandbox/,
+    )
+  })
+
+  it('accessToken 允许为空字符串', () => {
+    expect.hasAssertions()
+    expect(() => new WeChatXpayCurrency(options({ accessToken: '' }))).not.toThrow()
   })
 })
