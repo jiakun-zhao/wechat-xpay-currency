@@ -1,0 +1,49 @@
+{
+  "name": "@jiakun-zhao/wechat-xpay-currency",
+  "version": "0.0.0",
+  "description": "",
+  "homepage": "https://github.com/jiakun-zhao/wechat-xpay-currency#readme",
+  "bugs": {
+    "url": "https://github.com/jiakun-zhao/wechat-xpay-currency/issues"
+  },
+  "license": "MIT",
+  "author": "Jiakun Zhao <hi@zhaojiakun.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiakun-zhao/wechat-xpay-currency.git"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "dev": "tsx src/index.ts",
+    "lint": "oxfmt && oxlint --fix",
+    "prepublishOnly": "pnpm build",
+    "release": "bumpp && pnpm publish && pnpx cnpm sync @jiakun-zhao/wechat-xpay-currency",
+    "test": "vitest"
+  },
+  "devDependencies": {
+    "@jiakun-zhao/config": "^0.0.12",
+    "@types/node": "^26.6.1",
+    "@vitest/ui": "^5.0.1",
+    "bumpp": "^12.3.0",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0",
+    "oxlint-tsgolint": "^7.0.2002",
+    "tsdown": "^0.23.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  }
+}
